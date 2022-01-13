@@ -11,7 +11,6 @@ import (
 	v1 "k8s.io/api/apps/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	k8sLog "sigs.k8s.io/controller-rutime/pkg/log"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
@@ -30,16 +29,10 @@ type PodReconciler struct {
 const (
 	containerdVersionAnnotation = "min-containerd-version"
 	minKubeletVersionAnnotation = "min-kubelet-version"
-	noSensMount                 = "no-sensitive-mount"
-	rs                          = "ReplicaSet"
-	deployment                  = "Deployment"
-	managedAnnotation           = "secure-controller"
-)
-
-var (
-	secureNodeSelector = map[string]string{
-		"secure": "true",
-	}
+	//noSensMount                 = "no-sensitive-mount"
+	rs                = "ReplicaSet"
+	deployment        = "Deployment"
+	managedAnnotation = "secure-controller"
 )
 
 //+kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;update;patch
@@ -58,7 +51,7 @@ var (
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.10.0/pkg/reconcile
 
 func (r *PodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	_ = k8sLog.FromContext(ctx)
+	//_ = k8sLog.FromContext(ctx)
 	log := r.Log.WithValues("pod", req.Name, "namespace", req.Namespace)
 
 	log.Info("reconcile loop started")
@@ -163,50 +156,20 @@ func (r *PodReconciler) GetAllAnnotations(ctx context.Context, obj metav1.Object
 	// Get OwnerRef
 	if len(obj.GetOwnerReferences()) > 0 {
 		for _, o := range obj.GetOwnerReferences() {
-			// TODO: rewrite this as it's super messy and not DRY
+			log.Info("got owner", "kind", o.Kind)
 			switch o.Kind {
 			case rs:
-				log.Info("got replicaset owner")
-				var res v1.ReplicaSet
-				oo := client.ObjectKey{Name: o.Name, Namespace: obj.GetNamespace()}
-				if err := r.Get(ctx,
-					oo,
-					&res); err != nil {
-					if apierrors.IsNotFound(err) {
-						return annotations, nil
-					}
-					return annotations, err
-				}
-
-				x, err := r.GetAllAnnotations(ctx, &res)
+				ann, err := r.getReplicaSetAnnotations(ctx, o.Name, obj.GetNamespace())
 				if err != nil {
-					if apierrors.IsNotFound(err) {
-						return annotations, nil
-					}
 					return annotations, err
 				}
-
-				res.Annotations = addAnnotation(res.Annotations)
-
-				if err := r.Update(ctx, &res); err != nil {
-					return annotations, err
-				}
-
-				annotations = mergeMaps(annotations, x)
+				annotations = mergeMaps(annotations, ann)
 			case deployment:
-				log.Info("got deployment owner")
-				var dep v1.Deployment
-				if err := r.Get(ctx,
-					client.ObjectKey{Name: o.Name, Namespace: obj.GetNamespace()},
-					&dep); err != nil {
-					return annotations, err
-				}
-
-				x, err := r.GetAllAnnotations(ctx, &dep)
+				ann, err := r.getDeploymentAnnotations(ctx, o.Name, obj.GetNamespace())
 				if err != nil {
 					return annotations, err
 				}
-				annotations = mergeMaps(annotations, x)
+				annotations = mergeMaps(annotations, ann)
 			}
 		}
 	}
@@ -214,23 +177,73 @@ func (r *PodReconciler) GetAllAnnotations(ctx context.Context, obj metav1.Object
 	return annotations, err
 }
 
-func (r *PodReconciler) GetReplicaSet(ctx context.Context, name, namespace string) *v1.ReplicaSet {
-	var res v1.ReplicaSet
-	oo := client.ObjectKey{Name: name, Namespace: namespace}
-	if err := r.Get(ctx,
-		oo,
-		&res); err != nil {
-		if apierrors.IsNotFound(err) {
-			return annotations, nil
-		}
-		return annotations, err
+func (r *PodReconciler) addAnnotation(ctx context.Context, obj client.Object) error {
+	current := obj.GetAnnotations()
+	managed := map[string]string{
+		managedAnnotation: "true",
 	}
+
+	obj.SetAnnotations(mergeMaps(current, managed))
+
+	return r.Update(ctx, obj)
 }
 
-func addAnnotation(anno map[string]string) map[string]string {
-	return mergeMaps(anno, map[string]string{
-		managedAnnotation: "true",
-	})
+func (r *PodReconciler) getReplicaSetAnnotations(ctx context.Context, name, namespace string) (map[string]string, error) {
+	annotations := make(map[string]string)
+
+	res, err := r.GetReplicaSet(ctx, name, namespace)
+	if err != nil {
+		return annotations, err
+	}
+
+	// add our "managed" annotation
+	if err := r.addAnnotation(ctx, res); err != nil {
+		return annotations, err
+	}
+
+	return r.GetAllAnnotations(ctx, res)
+}
+
+func (r *PodReconciler) GetReplicaSet(ctx context.Context, name, namespace string) (*v1.ReplicaSet, error) {
+	var res v1.ReplicaSet
+	var err error
+	obj := client.ObjectKey{Name: name, Namespace: namespace}
+	if err := r.Get(ctx, obj, &res); err != nil {
+		if apierrors.IsNotFound(err) {
+			r.Log.Error(err, "could not find replicaset owner", "replicaset_name", name)
+			return &res, nil
+		}
+	}
+	return &res, err
+}
+
+func (r *PodReconciler) getDeploymentAnnotations(ctx context.Context, name, namespace string) (map[string]string, error) {
+	annotations := make(map[string]string)
+
+	dep, err := r.getDeployment(ctx, name, namespace)
+	if err != nil {
+		return annotations, err
+	}
+
+	if err := r.addAnnotation(ctx, dep); err != nil {
+		return annotations, err
+	}
+
+	return r.GetAllAnnotations(ctx, dep)
+}
+
+func (r *PodReconciler) getDeployment(ctx context.Context, name, namespace string) (*v1.Deployment, error) {
+	var dep v1.Deployment
+	var err error
+	obj := client.ObjectKey{Name: name, Namespace: namespace}
+
+	if err := r.Get(ctx, obj, &dep); err != nil {
+		if apierrors.IsNotFound(err) {
+			r.Log.Error(err, "could not find deployment owner", "deployment_name", name)
+			return &dep, nil
+		}
+	}
+	return &dep, err
 }
 
 func mergeMaps(ms ...map[string]string) map[string]string {
@@ -243,32 +256,6 @@ func mergeMaps(ms ...map[string]string) map[string]string {
 	}
 	return res
 }
-
-//{
-//"apiVersion": "v1",
-//"kind": "Pod",
-//"metadata": {
-//"creationTimestamp": "2022-01-11T09:29:03Z",
-//"generateName": "test-dep-fcc75fd64-",
-//"labels": {
-//"app": "test-dep",
-//"pod-template-hash": "fcc75fd64"
-//},
-//"name": "test-dep-fcc75fd64-8672s",
-//"namespace": "default",
-//"ownerReferences": [
-//{
-//"apiVersion": "apps/v1",
-//"blockOwnerDeletion": true,
-//"controller": true,
-//"kind": "ReplicaSet",
-//"name": "test-dep-fcc75fd64",
-//"uid": "1d56360b-3a84-48e0-886c-8d767d008ada"
-//}
-//],
-//"resourceVersion": "697",
-//"uid": "a97b0f38-e708-4dac-8443-adde4dad4b21"
-//},
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *PodReconciler) SetupWithManager(mgr ctrl.Manager) error {

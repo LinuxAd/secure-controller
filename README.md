@@ -1,10 +1,18 @@
 # Secure Kubernetes Workload Manager
 
+## Requirements
+
+* Docker
+* GNU Make
+* bash needs to be installed
+
+## Running the project
+
 To deploy a new cluster for testing:
 ```bash
 make cluster
 ```
-To deploy this manager to the cluster:
+To run tests and deploy this manager to the cluster:
 ```bash
 make docker-build deploy
 ```

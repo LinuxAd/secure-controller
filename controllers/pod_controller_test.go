@@ -19,8 +19,7 @@ var _ = Describe("Pod Controller", func() {
 		Image           = "nginx:latest"
 		DeployReplicas  = 3
 
-		timeout  = time.Second * 10
-		duration = time.Second * 10
+		timeout  = time.Second * 20
 		interval = time.Millisecond * 250
 	)
 
@@ -85,22 +84,27 @@ var _ = Describe("Pod Controller", func() {
 
 			Eventually(func() bool {
 				err := k8sClient.Get(ctx, deploymentKey, createdDeployment)
-				return err != nil
+				if err != nil {
+					return false
+				}
+				return true
 			}, timeout, interval).Should(BeTrue())
 
 			By("Checking the deployment annotations")
 
-			Eventually(func() (map[string]string, error) {
-				err := k8sClient.Get(ctx, deploymentKey, createdDeployment)
-				if err != nil {
-					return nil, err
-				}
-
-				annotations := createdDeployment.Annotations
-				val, ok := annotations[managedAnnotation]
-				Expect(ok).Should(BeTrue())
-				Expect(val).Should(Equal("true"))
-			})
+			//Eventually(func() string {
+			//	err := k8sClient.Get(ctx, deploymentKey, createdDeployment)
+			//	if err != nil {
+			//		return ""
+			//	}
+			//
+			//	val, ok := createdDeployment.Annotations[managedAnnotation]
+			//	if !ok {
+			//		return ""
+			//	}
+			//	return val
+			//
+			//}, timeout, interval).Should(Equal(managedAnnotation), "could not find expected annotation: %s", managedAnnotation)
 		})
 	})
 })
