@@ -8,6 +8,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"strings"
 
 	"time"
 )
@@ -26,7 +28,7 @@ var _ = Describe("Pod Controller", func() {
 	replicas := int32(DeployReplicas)
 
 	Context("When creating a new deployment", func() {
-		It("Should add annotation to pods to say managed by", func() {
+		It("Should add label to pods to indicate the controller is managing them", func() {
 			By("By creating a new deployment")
 			ctx := context.Background()
 			deployment := &appsv1.Deployment{
@@ -89,22 +91,44 @@ var _ = Describe("Pod Controller", func() {
 				}
 				return true
 			}, timeout, interval).Should(BeTrue())
+			By("pods are created")
 
-			By("Checking the deployment annotations")
+			Eventually(func() []string {
+				var names []string
+				podList := corev1.PodList{}
 
-			//Eventually(func() string {
-			//	err := k8sClient.Get(ctx, deploymentKey, createdDeployment)
-			//	if err != nil {
-			//		return ""
-			//	}
-			//
-			//	val, ok := createdDeployment.Annotations[managedAnnotation]
-			//	if !ok {
-			//		return ""
-			//	}
-			//	return val
-			//
-			//}, timeout, interval).Should(Equal(managedAnnotation), "could not find expected annotation: %s", managedAnnotation)
+				err := k8sClient.List(ctx, &podList, &client.ListOptions{
+					Namespace: DeployNameSpace,
+				})
+				if err != nil {
+					return names
+				}
+
+				for _, p := range podList.Items {
+					if strings.Contains(p.Name, deploymentKey.Name) {
+						names = append(names, p.Name)
+					}
+				}
+
+				return names
+			}, timeout, interval).Should(Not(BeNil()))
+
+			By("Checking the deployment labels")
+
+			Eventually(func() []string {
+				var labels []string
+
+				err := k8sClient.Get(ctx, deploymentKey, createdDeployment)
+				if err != nil {
+					return labels
+				}
+
+				for k, _ := range createdDeployment.Labels {
+					labels = append(labels, k)
+				}
+				return labels
+
+			}, timeout, interval).Should(ContainElement(managedLabel), "could not find expected label: %s", managedLabel)
 		})
 	})
 })

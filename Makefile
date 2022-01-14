@@ -88,7 +88,12 @@ endif
 
 .PHONY: cluster
 cluster: ## Bring up a kind cluster for testing
-	kind create cluster --config ./config/kind/kind-conf.yaml
+	kind delete cluster && \
+	kind create cluster --config ./config/kind/kind-conf.yaml || printf "\n\n*****\nCould not or didn't need to create cluster\n*****\n\n"
+
+.PHONY: watch
+watch: ## Watch the logs for the controller after deploy.
+	kubectl logs -f $$(kubectl get pods -n secure-controller-system --no-headers | cut -d ' ' -f 1) -n secure-controller-system
 
 .PHONY: load ## Loads the container image into a kubernetes test environment.
 load:

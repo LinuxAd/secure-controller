@@ -9,14 +9,13 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/rogpeppe/go-internal/semver"
 	v1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"strings"
-
-	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"strings"
 )
 
 // PodReconciler reconciles a Deployment object
@@ -30,15 +29,21 @@ const (
 	containerdVersionAnnotation = "min-containerd-version"
 	minKubeletVersionAnnotation = "min-kubelet-version"
 	//noSensMount                 = "no-sensitive-mount"
-	rs                = "ReplicaSet"
-	deployment        = "Deployment"
-	managedAnnotation = "secure-controller"
+	rs           = "ReplicaSet"
+	deployment   = "Deployment"
+	managedLabel = "secure-controller"
+)
+
+var (
+	managed = map[string]string{
+		managedLabel: "true",
+	}
 )
 
 //+kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;update;patch
-//+kubebuilder:rbac:groups=apps,resources=replicasets,verbs=get;list;watch
-//+kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch
-//+kubebuilder:rbac:groups=apps,resources=nodes,verbs=get;list;watch
+//+kubebuilder:rbac:groups=apps,resources=replicasets,verbs=get;list;watch;update;patch
+//+kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;update;patch
+//+kubebuilder:rbac:groups=apps,resources=nodes,verbs=get;list;watch;update;patch
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -49,6 +54,15 @@ const (
 //
 // For more details, check Reconcile and its Result here:
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.10.0/pkg/reconcile
+
+func checkSkippedNamespaces(str string, subs ...string) bool {
+	for _, su := range subs {
+		if strings.Contains(str, su) {
+			return true
+		}
+	}
+	return false
+}
 
 func (r *PodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	//_ = k8sLog.FromContext(ctx)
@@ -64,8 +78,9 @@ func (r *PodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 		}
 		log.Error(err, "unable to fetch pod")
 	}
-	if strings.Contains(pod.Namespace, "kube-") || strings.Contains(pod.Namespace, "secure-controller") {
-		log.Info("skipping pod")
+
+	if checkSkippedNamespaces(pod.Namespace, "kube-", "secure-controller", "local-path-storage") {
+		log.Info("skipping pod due to being in privileged namespace")
 		return ctrl.Result{}, nil
 	}
 
@@ -73,11 +88,11 @@ func (r *PodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 
 	if len(pod.OwnerReferences) == 0 {
 		log.Info("pod has no owner")
-		// check the pod's annotations?
+		// check the pod's labels?
 	}
 
-	// Get all annotations up the tree for replicasets and deployments etc
-	annotations, err := r.GetAllAnnotations(ctx, &pod)
+	// Get all labels up the tree for replicasets and deployments etc
+	labels, err := r.GetLabelsAll(ctx, &pod)
 	if err != nil {
 		log.Error(err, "error getting annotation tree")
 		return ctrl.Result{}, err
@@ -86,14 +101,14 @@ func (r *PodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 	var minContainerVersion string
 	var minKubeleteVersion string
 	// handle containerdVersion
-	if x, ok := annotations[containerdVersionAnnotation]; ok {
+	if x, ok := labels[containerdVersionAnnotation]; ok {
 		minContainerVersion = x
 	}
-	if y, ok := annotations[minKubeletVersionAnnotation]; ok {
+	if y, ok := labels[minKubeletVersionAnnotation]; ok {
 		minKubeleteVersion = y
 	}
 
-	// if either of the annotations aren't present, nothing to do
+	// if either of the labels aren't present, nothing to do
 	if len(minContainerVersion) == 0 || len(minKubeleteVersion) == 0 {
 		return ctrl.Result{}, nil
 	}
@@ -107,6 +122,7 @@ func (r *PodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 	nodeKubeletVersion := node.Status.NodeInfo.KubeletVersion
 
 	vs := node.Status.VolumesAttached
+	// TODO: use the output from this to build the functionality around sandboxing insecure workloads
 	for i, v := range vs {
 		log.Info("node has volumes attached", "num", i, "vol_name", v.Name, "vol_dev_path", v.DevicePath)
 	}
@@ -114,7 +130,7 @@ func (r *PodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 	log.Info("current node runtime versions",
 		"got_containerRuntime", nodeContainerRuntime,
 		"got_kubeletVersion", node.Status.NodeInfo.KubeletVersion)
-
+	r.addLabel(ctx, &pod)
 	if len(minContainerVersion) > 0 {
 		if !MinVersionMet(nodeContainerRuntime, minContainerVersion) {
 			log.Info("minimum containerd runtime not met, deleting pod")
@@ -146,49 +162,46 @@ func MinVersionMet(got, want string) bool {
 	}
 }
 
-func (r *PodReconciler) GetAllAnnotations(ctx context.Context, obj metav1.Object) (map[string]string, error) {
-	var annotations map[string]string
+func (r *PodReconciler) GetLabelsAll(ctx context.Context, obj metav1.Object) (map[string]string, error) {
+	var labels map[string]string
 	log := r.Log.WithValues("object", obj.GetName())
-	// Get obj annotations
-	annotations = mergeMaps(annotations, obj.GetAnnotations())
+	// Get obj labels
+	labels = mergeMaps(labels, obj.GetLabels())
 	var err error
 
 	// Get OwnerRef
 	if len(obj.GetOwnerReferences()) > 0 {
 		for _, o := range obj.GetOwnerReferences() {
 			log.Info("got owner", "kind", o.Kind)
+			lbl := make(map[string]string)
 			switch o.Kind {
 			case rs:
-				ann, err := r.getReplicaSetAnnotations(ctx, o.Name, obj.GetNamespace())
+				lbl, err = r.getRSLabels(ctx, o.Name, obj.GetNamespace())
 				if err != nil {
-					return annotations, err
+					return labels, err
 				}
-				annotations = mergeMaps(annotations, ann)
 			case deployment:
-				ann, err := r.getDeploymentAnnotations(ctx, o.Name, obj.GetNamespace())
+				lbl, err = r.getDepLabels(ctx, o.Name, obj.GetNamespace())
 				if err != nil {
-					return annotations, err
+					return labels, err
 				}
-				annotations = mergeMaps(annotations, ann)
 			}
+			labels = mergeMaps(labels, lbl)
+
 		}
 	}
 
-	return annotations, err
+	return labels, err
 }
 
-func (r *PodReconciler) addAnnotation(ctx context.Context, obj client.Object) error {
-	current := obj.GetAnnotations()
-	managed := map[string]string{
-		managedAnnotation: "true",
-	}
+func (r *PodReconciler) addLabel(ctx context.Context, obj client.Object) error {
 
-	obj.SetAnnotations(mergeMaps(current, managed))
+	obj.SetLabels(managed)
 
 	return r.Update(ctx, obj)
 }
 
-func (r *PodReconciler) getReplicaSetAnnotations(ctx context.Context, name, namespace string) (map[string]string, error) {
+func (r *PodReconciler) getRSLabels(ctx context.Context, name, namespace string) (map[string]string, error) {
 	annotations := make(map[string]string)
 
 	res, err := r.GetReplicaSet(ctx, name, namespace)
@@ -197,11 +210,7 @@ func (r *PodReconciler) getReplicaSetAnnotations(ctx context.Context, name, name
 	}
 
 	// add our "managed" annotation
-	if err := r.addAnnotation(ctx, res); err != nil {
-		return annotations, err
-	}
-
-	return r.GetAllAnnotations(ctx, res)
+	return r.GetLabelsAll(ctx, res)
 }
 
 func (r *PodReconciler) GetReplicaSet(ctx context.Context, name, namespace string) (*v1.ReplicaSet, error) {
@@ -217,19 +226,19 @@ func (r *PodReconciler) GetReplicaSet(ctx context.Context, name, namespace strin
 	return &res, err
 }
 
-func (r *PodReconciler) getDeploymentAnnotations(ctx context.Context, name, namespace string) (map[string]string, error) {
-	annotations := make(map[string]string)
+func (r *PodReconciler) getDepLabels(ctx context.Context, name, namespace string) (map[string]string, error) {
+	labels := make(map[string]string)
 
 	dep, err := r.getDeployment(ctx, name, namespace)
 	if err != nil {
-		return annotations, err
+		return labels, err
 	}
 
-	if err := r.addAnnotation(ctx, dep); err != nil {
-		return annotations, err
+	if err := r.addLabel(ctx, dep); err != nil {
+		return labels, err
 	}
 
-	return r.GetAllAnnotations(ctx, dep)
+	return r.GetLabelsAll(ctx, dep)
 }
 
 func (r *PodReconciler) getDeployment(ctx context.Context, name, namespace string) (*v1.Deployment, error) {
