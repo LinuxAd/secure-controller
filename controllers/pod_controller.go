@@ -29,14 +29,14 @@ const (
 	containerdVersionAnnotation = "min-containerd-version"
 	minKubeletVersionAnnotation = "min-kubelet-version"
 	//noSensMount                 = "no-sensitive-mount"
-	rs           = "ReplicaSet"
-	deployment   = "Deployment"
-	managedLabel = "secure-controller"
+	rs         = "ReplicaSet"
+	deployment = "Deployment"
+	managedKey = "secure-controller"
 )
 
 var (
 	managed = map[string]string{
-		managedLabel: "true",
+		managedKey: "true",
 	}
 )
 
@@ -79,6 +79,11 @@ func (r *PodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 		log.Error(err, "unable to fetch pod")
 	}
 
+	if pod.Spec.NodeName == "" {
+		log.Info("pod has no node yet")
+		return ctrl.Result{}, nil
+	}
+
 	if checkSkippedNamespaces(pod.Namespace, "kube-", "secure-controller", "local-path-storage") {
 		log.Info("skipping pod due to being in privileged namespace")
 		return ctrl.Result{}, nil
@@ -88,7 +93,6 @@ func (r *PodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 
 	if len(pod.OwnerReferences) == 0 {
 		log.Info("pod has no owner")
-		// check the pod's labels?
 	}
 
 	// Get all labels up the tree for replicasets and deployments etc
@@ -100,7 +104,6 @@ func (r *PodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 
 	var minContainerVersion string
 	var minKubeleteVersion string
-	// handle containerdVersion
 	if x, ok := labels[containerdVersionAnnotation]; ok {
 		minContainerVersion = x
 	}
@@ -111,6 +114,10 @@ func (r *PodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 	// if either of the labels aren't present, nothing to do
 	if len(minContainerVersion) == 0 || len(minKubeleteVersion) == 0 {
 		return ctrl.Result{}, nil
+	}
+
+	if err := r.addLabel(ctx, &pod); err != nil {
+		return ctrl.Result{}, err
 	}
 
 	var node corev1.Node
@@ -130,7 +137,6 @@ func (r *PodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 	log.Info("current node runtime versions",
 		"got_containerRuntime", nodeContainerRuntime,
 		"got_kubeletVersion", node.Status.NodeInfo.KubeletVersion)
-	r.addLabel(ctx, &pod)
 	if len(minContainerVersion) > 0 {
 		if !MinVersionMet(nodeContainerRuntime, minContainerVersion) {
 			log.Info("minimum containerd runtime not met, deleting pod")
@@ -194,13 +200,6 @@ func (r *PodReconciler) GetLabelsAll(ctx context.Context, obj metav1.Object) (ma
 	return labels, err
 }
 
-func (r *PodReconciler) addLabel(ctx context.Context, obj client.Object) error {
-
-	obj.SetLabels(managed)
-
-	return r.Update(ctx, obj)
-}
-
 func (r *PodReconciler) getRSLabels(ctx context.Context, name, namespace string) (map[string]string, error) {
 	annotations := make(map[string]string)
 
@@ -248,7 +247,7 @@ func (r *PodReconciler) getDeployment(ctx context.Context, name, namespace strin
 
 	if err := r.Get(ctx, obj, &dep); err != nil {
 		if apierrors.IsNotFound(err) {
-			r.Log.Error(err, "could not find deployment owner", "deployment_name", name)
+			r.Log.Error(err, "could not find testfiles owner", "deployment_name", name)
 			return &dep, nil
 		}
 	}
@@ -271,4 +270,14 @@ func (r *PodReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&corev1.Pod{}).
 		Complete(r)
+}
+
+func (r *PodReconciler) addLabel(ctx context.Context, obj client.Object) error {
+	obj.SetLabels(mergeMaps(obj.GetLabels(), managed))
+	err := r.Update(ctx, obj)
+	if err != nil {
+		return err
+	}
+
+	return r.Get(ctx, client.ObjectKey{Name: obj.GetName(), Namespace: obj.GetNamespace()}, obj)
 }

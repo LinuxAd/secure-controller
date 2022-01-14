@@ -86,9 +86,12 @@ ifndef ignore-not-found
   ignore-not-found = false
 endif
 
+.PHONY: clean
+clean:
+	kind delete cluster
+
 .PHONY: cluster
 cluster: ## Bring up a kind cluster for testing
-	kind delete cluster && \
 	kind create cluster --config ./config/kind/kind-conf.yaml || printf "\n\n*****\nCould not or didn't need to create cluster\n*****\n\n"
 
 .PHONY: watch

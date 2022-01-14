@@ -1,5 +1,7 @@
 # Secure Kubernetes Workload Manager
 
+Developed and tested on a mac running Mac OSX 12.1 Monterey.
+
 ## Requirements
 
 * Docker (tested on 20.10.11 docker desktop)
@@ -18,7 +20,7 @@ make cluster docker-build deploy
 ```
 To deploy the test deployment to the default namespace:
 ```bash
-kubectl apply -f ./config/deployment
+kubectl apply -f ./config/testfiles
 ```
 Watch the logs for the manager pod:
 ```bash
@@ -26,5 +28,5 @@ kubectl logs -f $(kubectl get pods -n secure-controller-system --no-headers | cu
 ```
 Cleanup:
 ```bash
-kind delete cluster
+make clean
 ```
